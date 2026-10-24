@@ -792,14 +792,28 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
 
                 // Force changing the slave latency to try to improve transfer throughput (bandwidth)
                 //  But Android and IOS will override it with their minimum supported value
+                ble_gap_conn_params_t const *p_cur = &p_ble_evt->evt.gap_evt.params.connected.conn_params;
                 ble_gap_conn_params_t p_conn_params;
-                p_conn_params.min_conn_interval = p_ble_evt->evt.gap_evt.params.connected.conn_params.min_conn_interval;
-                p_conn_params.max_conn_interval = p_ble_evt->evt.gap_evt.params.connected.conn_params.max_conn_interval;
+                p_conn_params.min_conn_interval = p_cur->min_conn_interval;
+                p_conn_params.max_conn_interval = p_cur->max_conn_interval;
                 p_conn_params.slave_latency     = SLAVE_LATENCY;
-                p_conn_params.conn_sup_timeout  = p_ble_evt->evt.gap_evt.params.connected.conn_params.conn_sup_timeout;
 
-                err_code = sd_ble_gap_conn_param_update(m_conn_handle, &p_conn_params);
-                APP_ERROR_CHECK(err_code);
+                // The supervision timeout must stay valid with the latency:
+                // timeout > (1 + latency) * interval * 2, i.e. in SoftDevice units
+                // (10 ms, 1.25 ms) timeout * 4 > (1 + latency) * interval. The
+                // central's own timeout can be too short for it: BlueZ connects at
+                // 30-50 ms with 420 ms, at 45 ms latency 4 needs > 450 ms. The
+                // request was then rejected (NRF_ERROR_INVALID_PARAM) and
+                // APP_ERROR_CHECK reset the bootloader right after connecting
+                // (the central saw HCI 0x3e). Use the shortest valid timeout then,
+                // and keep the connection whatever the answer.
+                uint32_t min_timeout = ((1u + SLAVE_LATENCY) * p_cur->max_conn_interval) / 4u + 1u;
+                uint32_t timeout = p_cur->conn_sup_timeout;
+                if (timeout < min_timeout) timeout = min_timeout;
+                if (timeout > BLE_GAP_CP_CONN_SUP_TIMEOUT_MAX) timeout = BLE_GAP_CP_CONN_SUP_TIMEOUT_MAX;
+                p_conn_params.conn_sup_timeout  = (uint16_t) timeout;
+
+                (void) sd_ble_gap_conn_param_update(m_conn_handle, &p_conn_params);
 
             }
             break;
