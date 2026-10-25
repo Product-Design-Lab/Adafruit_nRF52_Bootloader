@@ -98,6 +98,7 @@ static uint16_t             m_pkt_notif_target;                                 
 static uint16_t             m_pkt_notif_target_cnt;                                                  /**< Number of packets of firmware data received after sending last Packet Receipt Notification or since the receipt of a @ref BLE_DFU_PKT_RCPT_NOTIF_ENABLED event from the DFU service, which ever occurs later.*/
 static uint8_t            * mp_rx_buffer;                                                            /**< Pointer to a RX buffer.*/
 static bool                 m_tear_down_in_progress  = false;                                        /**< Variable to indicate whether a tear down is in progress. A tear down could be because the application has initiated it or the peer has disconnected. */
+static bool                 m_update_started         = false;                                        /**< Variable to denote whether the DFU Controller has started an update (Start Packet) on this boot. */
 static bool                 m_pkt_rcpt_notif_enabled = false;                                        /**< Variable to denote whether packet receipt notification has been enabled by the DFU controller.*/
 static uint16_t             m_conn_handle            = BLE_CONN_HANDLE_INVALID;                      /**< Handle of the current connection. */
 static bool                 m_is_advertising         = false;                                        /**< Variable to indicate if advertising is ongoing.*/
@@ -608,6 +609,7 @@ static void on_dfu_evt(ble_dfu_t * p_dfu, ble_dfu_evt_t * p_evt)
             break;
 
         case BLE_DFU_START:
+            m_update_started = true;
             m_pkt_type    = PKT_TYPE_START;
             m_update_mode = (uint8_t)p_evt->evt.ble_dfu_pkt_write.p_data[0];
             break;
@@ -834,11 +836,24 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
             }
             if (!m_tear_down_in_progress)
             {
-                // The Disconnected event is because of an external event. (Link loss or
-                // disconnect triggered by the DFU Controller before the firmware update was
-                // complete).
-                // Restart advertising so that the DFU Controller can reconnect if possible.
-                advertising_start();
+                if (m_update_started)
+                {
+                    // The link dropped during an update. The legacy DFU protocol
+                    // can't resume one, and this session would refuse the next
+                    // Start Packet (invalid state) until a System Reset. Reset
+                    // as that op code does: after an incomplete transfer the
+                    // bootloader comes back in BLE update mode, the Controller
+                    // starts over.
+                    m_tear_down_in_progress = true;
+                    dfu_reset();
+                }
+                else
+                {
+                    // The Disconnected event is because of an external event (no
+                    // update started yet). Restart advertising so that the DFU
+                    // Controller can reconnect if possible.
+                    advertising_start();
+                }
             }
 
             m_conn_handle = BLE_CONN_HANDLE_INVALID;
