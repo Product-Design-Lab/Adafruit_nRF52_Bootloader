@@ -98,6 +98,8 @@ static uint16_t             m_pkt_notif_target;                                 
 static uint16_t             m_pkt_notif_target_cnt;                                                  /**< Number of packets of firmware data received after sending last Packet Receipt Notification or since the receipt of a @ref BLE_DFU_PKT_RCPT_NOTIF_ENABLED event from the DFU service, which ever occurs later.*/
 static uint8_t            * mp_rx_buffer;                                                            /**< Pointer to a RX buffer.*/
 static bool                 m_tear_down_in_progress  = false;                                        /**< Variable to indicate whether a tear down is in progress. A tear down could be because the application has initiated it or the peer has disconnected. */
+static uint8_t              m_rx_in_flight           = 0;                                            /**< Data packets received and not yet written to flash (receive buffers in use). */
+static bool                 m_pkt_rcpt_pending       = false;                                        /**< A packet receipt is due but waits for free receive buffers. */
 static bool                 m_update_started         = false;                                        /**< Variable to denote whether the DFU Controller has started an update (Start Packet) on this boot. */
 static bool                 m_pkt_rcpt_notif_enabled = false;                                        /**< Variable to denote whether packet receipt notification has been enabled by the DFU controller.*/
 static uint16_t             m_conn_handle            = BLE_CONN_HANDLE_INVALID;                      /**< Handle of the current connection. */
@@ -237,6 +239,26 @@ static void prioritize_flash_writes_over_ble(void) {
   #define prioritize_ble_over_flash_writes()
   #define prioritize_flash_writes_over_ble()
 #endif
+
+/* Packet receipts are the DFU Controller's flow control: it sends the next
+ * block only when one arrives. Sent on reception, they let a fast link outrun
+ * the flash writes until the receive buffers run out (the data then fails
+ * with "operation failed"). Hold a due receipt until the next block fits in
+ * the free buffers.
+ */
+static void pkt_rcpt_send_if_room(void)
+{
+    uint32_t const need = MIN(m_pkt_notif_target, HCI_RX_BUF_QUEUE_SIZE);
+
+    if (m_pkt_rcpt_pending && IS_CONNECTED() &&
+        (uint32_t)(HCI_RX_BUF_QUEUE_SIZE - m_rx_in_flight) >= need)
+    {
+        m_pkt_rcpt_pending = false;
+        uint32_t err_code = ble_dfu_pkts_rcpt_notify(&m_dfu, m_num_of_firmware_bytes_rcvd);
+        APP_ERROR_CHECK(err_code);
+    }
+}
+
 /**@brief     Function for handling the callback events from the dfu module.
  *            Callbacks are expected when \ref dfu_data_pkt_handle has been executed.
  *
@@ -269,6 +291,8 @@ static void dfu_cb_handler(uint32_t packet, uint32_t result, uint8_t * p_data)
             {
                 err_code = hci_mem_pool_rx_consume(p_data);
                 APP_ERROR_CHECK(err_code);
+                if (m_rx_in_flight > 0) m_rx_in_flight--;
+                pkt_rcpt_send_if_room();
 
                 // If the callback matches final data packet received then the peer is notified.
                 if (mp_final_packet == p_data)
@@ -461,6 +485,7 @@ static void app_data_process(ble_dfu_t * p_dfu, ble_dfu_evt_t * p_evt)
         dfu_error_notify(p_dfu, err_code);
         return;
     }
+    m_rx_in_flight++;
 
     uint8_t * p_data_packet = p_evt->evt.ble_dfu_pkt_write.p_data;
 
@@ -510,8 +535,10 @@ static void app_data_process(ble_dfu_t * p_dfu, ble_dfu_evt_t * p_evt)
 
             if (m_pkt_notif_target_cnt == 0)
             {
-                err_code = ble_dfu_pkts_rcpt_notify(p_dfu, m_num_of_firmware_bytes_rcvd);
-                APP_ERROR_CHECK(err_code);
+                // Sent now if the next block fits in the free receive buffers,
+                // else once flash writes have freed them.
+                m_pkt_rcpt_pending = true;
+                pkt_rcpt_send_if_room();
 
                 // Reset the counter for the number of firmware packets.
                 m_pkt_notif_target_cnt = m_pkt_notif_target;
