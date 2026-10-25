@@ -286,6 +286,12 @@ void uf2_init(void)
   {
     strcat(infoUf2File, "not found\r\n");
   }
+
+  // The last fatal error, if one reset the chip since the application last ran.
+  extern void crash_record_text(char* buf, uint32_t size);
+  char crash[128];
+  crash_record_text(crash, sizeof(crash));
+  if (strlen(infoUf2File) + strlen(crash) < sizeof(infoUf2File)) strcat(infoUf2File, crash);
 }
 
 /*------------------------------------------------------------------*/

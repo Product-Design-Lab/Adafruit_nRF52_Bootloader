@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stddef.h>
 
 #include "nrfx.h"
@@ -141,6 +142,8 @@ uint32_t* dbl_reset_mem = ((uint32_t*) DFU_DBL_RESET_MEM);
 bool _ota_dfu = false;
 bool _ota_connected = false;
 bool _ota_was_connected = false;
+
+static void crash_record_clear(void);
 bool _sd_inited = false;
 
 bool is_ota(void) {
@@ -230,6 +233,7 @@ int main(void) {
 
     // start application
     PRINTF("Starting app...\r\n");
+    crash_record_clear();
     bootloader_app_start();
   }
 
@@ -601,7 +605,77 @@ void SD_EVT_IRQHandler(void) {
 //--------------------------------------------------------------------+
 // Error Handler
 //--------------------------------------------------------------------+
+// Last fatal error: the handler below resets the chip, so without a debugger a
+// failed check left no trace. Kept over that reset (RAM survives a soft reset,
+// .crashlog isn't initialised at start-up) and shown in INFO_UF2.TXT; cleared
+// when the application is started.
+#define CRASH_RECORD_MAGIC  0xC0DEDEADUL
+
+typedef struct {
+  uint32_t magic;
+  uint32_t count;     // fatal errors since the record was last cleared
+  uint32_t id;        // NRF_FAULT_ID_*
+  uint32_t pc;
+  uint32_t err_code;
+  uint32_t line;
+  const uint8_t* file;
+} crash_record_t;
+
+__attribute__((section(".crashlog"))) static volatile crash_record_t _crash;
+
+static void cat_num(char* buf, char const* label, uint32_t v, int base) {
+  char str[12];
+  strcat(buf, label);
+  if (base == 16) strcat(buf, "0x");
+  utoa(v, str, base);
+  strcat(buf, str);
+}
+
+// "Last error: ...\r\n" into buf (at least 128 bytes), or "" when none.
+void crash_record_text(char* buf, uint32_t size) {
+  (void) size;
+  buf[0] = 0;
+  if (_crash.magic != CRASH_RECORD_MAGIC) return;
+
+  // File names are __FILE__ strings in this bootloader's flash.
+  char const* file = (char const*) _crash.file;
+  if (file) {
+    char const* slash = strrchr(file, '/');
+    if (slash) file = slash + 1;
+    if (strlen(file) > 40) file += strlen(file) - 40;
+  }
+  strcat(buf, "Last error:");
+  cat_num(buf, " id ", _crash.id, 16);
+  cat_num(buf, " err ", _crash.err_code, 16);
+  strcat(buf, " at ");
+  strcat(buf, file ? file : "?");
+  cat_num(buf, ":", _crash.line, 10);
+  cat_num(buf, " pc ", _crash.pc, 16);
+  cat_num(buf, " x", _crash.count, 10);
+  cat_num(buf, " reset ", NRF_POWER->RESETREAS, 16);
+  strcat(buf, "\r\n");
+}
+
+static void crash_record_clear(void) {
+  _crash.magic = 0;
+}
+
 void app_error_fault_handler(uint32_t id, uint32_t pc, uint32_t info) {
+  uint32_t const count = (_crash.magic == CRASH_RECORD_MAGIC) ? _crash.count + 1 : 1;
+  _crash.id       = id;
+  _crash.pc       = pc;
+  _crash.err_code = 0;
+  _crash.line     = 0;
+  _crash.file     = NULL;
+  if (id == NRF_FAULT_ID_SDK_ERROR && info) {
+    error_info_t const* e = (error_info_t const*) info;
+    _crash.err_code = e->err_code;
+    _crash.line     = e->line_num;
+    _crash.file     = e->p_file_name;
+  }
+  _crash.count = count;
+  _crash.magic = CRASH_RECORD_MAGIC;
+
   volatile uint32_t *ARM_CM_DHCSR = ((volatile uint32_t *)0xE000EDF0UL); /* Cortex M CoreDebug->DHCSR */
   if ((*ARM_CM_DHCSR) & 1UL) {
     __asm("BKPT #0\n");                                                  /* Only halt mcu if debugger is attached */

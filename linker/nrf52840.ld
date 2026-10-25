@@ -23,7 +23,10 @@ MEMORY
 
   /** RAM Region for bootloader. */
   /* Avoid conflict with NOINIT for OTA bond sharing */
-  RAM (rwx) :  ORIGIN = 0x20008000, LENGTH = 0x20040000-0x20008000
+  RAM (rwx) :  ORIGIN = 0x20008000, LENGTH = 0x20040000-0x20008000 - 0x20
+
+  /* Last fatal error, kept over the reset it causes (not initialised) */
+  CRASHLOG (rwx) :  ORIGIN = 0x20040000 - 0x20, LENGTH = 0x20
 
   /* Location for double reset detection, no init */
   DBL_RESET (rwx) :  ORIGIN = 0x20007F7C, LENGTH = 0x04
@@ -87,6 +90,11 @@ SECTIONS
   {
 
   } > NOINIT
+
+  .crashlog(NOLOAD) :
+  {
+    KEEP(*(.crashlog))
+  } > CRASHLOG
   /* other placements follow here... */
 }
 
