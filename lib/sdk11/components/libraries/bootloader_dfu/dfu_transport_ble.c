@@ -49,6 +49,26 @@
 #define MIN_CONN_INTERVAL                    (uint16_t)(MSEC_TO_UNITS(15, UNIT_1_25_MS))             /**< Minimum acceptable connection interval (11.25 milliseconds). */
 #define MAX_CONN_INTERVAL                    (uint16_t)(MSEC_TO_UNITS(30, UNIT_1_25_MS))             /**< Maximum acceptable connection interval (15 milliseconds). */
 #define SLAVE_LATENCY                        4                                                       /**< Slave latency. */
+// Interval asked for at connect, for the erase: the flash erase only runs in
+// the gaps between connection events, so it is slower at short intervals
+// (13.5 s at 30 ms, 22 s at 15 ms for 356 KB). Centrals may remember the
+// transfer interval from the last update and connect with it (BlueZ does).
+#ifndef ERASE_CONN_INTERVAL_MIN
+#define ERASE_CONN_INTERVAL_MIN              (uint16_t)(MSEC_TO_UNITS(30, UNIT_1_25_MS))
+#endif
+#ifndef ERASE_CONN_INTERVAL_MAX
+#define ERASE_CONN_INTERVAL_MAX              (uint16_t)(MSEC_TO_UNITS(50, UNIT_1_25_MS))
+#endif
+// Interval asked for when the firmware data starts (after the erase, which gets
+// more flash time at the central's longer interval): every packet receipt
+// takes about two connection intervals to come back, so the transfer rate
+// follows the interval. Centrals apply their own limits (phones often 15 ms+).
+#ifndef TRANSFER_CONN_INTERVAL_MIN
+#define TRANSFER_CONN_INTERVAL_MIN           (uint16_t)(MSEC_TO_UNITS(7.5, UNIT_1_25_MS))
+#endif
+#ifndef TRANSFER_CONN_INTERVAL_MAX
+#define TRANSFER_CONN_INTERVAL_MAX           (uint16_t)(MSEC_TO_UNITS(15, UNIT_1_25_MS))
+#endif
 #define CONN_SUP_TIMEOUT                     MSEC_TO_UNITS(8000, UNIT_10_MS)                         /**< Connection supervisory timeout (4 seconds). */
 #define SPEEDUP_FLASH_WRITES                 1 /**< Speedup FLASH writes by changing Softdevice local latency */
 
@@ -100,6 +120,7 @@ static uint8_t            * mp_rx_buffer;                                       
 static bool                 m_tear_down_in_progress  = false;                                        /**< Variable to indicate whether a tear down is in progress. A tear down could be because the application has initiated it or the peer has disconnected. */
 static uint8_t              m_rx_in_flight           = 0;                                            /**< Data packets received and not yet written to flash (receive buffers in use). */
 static bool                 m_pkt_rcpt_pending       = false;                                        /**< A packet receipt is due but waits for free receive buffers. */
+static uint16_t             m_conn_sup_timeout;                                                      /**< The connection's supervision timeout (10 ms units). */
 static bool                 m_update_started         = false;                                        /**< Variable to denote whether the DFU Controller has started an update (Start Packet) on this boot. */
 static bool                 m_pkt_rcpt_notif_enabled = false;                                        /**< Variable to denote whether packet receipt notification has been enabled by the DFU controller.*/
 static uint16_t             m_conn_handle            = BLE_CONN_HANDLE_INVALID;                      /**< Handle of the current connection. */
@@ -259,6 +280,23 @@ static void pkt_rcpt_send_if_room(void)
     }
 }
 
+/* Ask for the short transfer interval, with a supervision timeout that stays
+ * valid at the slave latency (see BLE_GAP_EVT_CONNECTED). */
+static void request_transfer_interval(void)
+{
+    ble_gap_conn_params_t conn_params;
+    conn_params.min_conn_interval = TRANSFER_CONN_INTERVAL_MIN;
+    conn_params.max_conn_interval = TRANSFER_CONN_INTERVAL_MAX;
+    conn_params.slave_latency     = SLAVE_LATENCY;
+
+    uint32_t min_timeout = ((1u + SLAVE_LATENCY) * TRANSFER_CONN_INTERVAL_MAX) / 4u + 1u;
+    uint32_t timeout = m_conn_sup_timeout;
+    if (timeout < min_timeout) timeout = min_timeout;
+    if (timeout > BLE_GAP_CP_CONN_SUP_TIMEOUT_MAX) timeout = BLE_GAP_CP_CONN_SUP_TIMEOUT_MAX;
+    conn_params.conn_sup_timeout  = (uint16_t) timeout;
+
+    (void) sd_ble_gap_conn_param_update(m_conn_handle, &conn_params);
+}
 /**@brief     Function for handling the callback events from the dfu module.
  *            Callbacks are expected when \ref dfu_data_pkt_handle has been executed.
  *
@@ -658,6 +696,8 @@ static void on_dfu_evt(ble_dfu_t * p_dfu, ble_dfu_evt_t * p_evt)
 
         case BLE_DFU_RECEIVE_APP_DATA:
             m_pkt_type = PKT_TYPE_FIRMWARE_DATA;
+            // The erase is done: a shorter interval for the data.
+            request_transfer_interval();
             break;
 
         case BLE_DFU_PACKET_WRITE:
@@ -824,8 +864,8 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
                 //  But Android and IOS will override it with their minimum supported value
                 ble_gap_conn_params_t const *p_cur = &p_ble_evt->evt.gap_evt.params.connected.conn_params;
                 ble_gap_conn_params_t p_conn_params;
-                p_conn_params.min_conn_interval = p_cur->min_conn_interval;
-                p_conn_params.max_conn_interval = p_cur->max_conn_interval;
+                p_conn_params.min_conn_interval = ERASE_CONN_INTERVAL_MIN;
+                p_conn_params.max_conn_interval = ERASE_CONN_INTERVAL_MAX;
                 p_conn_params.slave_latency     = SLAVE_LATENCY;
 
                 // The supervision timeout must stay valid with the latency:
@@ -837,11 +877,12 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
                 // APP_ERROR_CHECK reset the bootloader right after connecting
                 // (the central saw HCI 0x3e). Use the shortest valid timeout then,
                 // and keep the connection whatever the answer.
-                uint32_t min_timeout = ((1u + SLAVE_LATENCY) * p_cur->max_conn_interval) / 4u + 1u;
+                uint32_t min_timeout = ((1u + SLAVE_LATENCY) * ERASE_CONN_INTERVAL_MAX) / 4u + 1u;
                 uint32_t timeout = p_cur->conn_sup_timeout;
                 if (timeout < min_timeout) timeout = min_timeout;
                 if (timeout > BLE_GAP_CP_CONN_SUP_TIMEOUT_MAX) timeout = BLE_GAP_CP_CONN_SUP_TIMEOUT_MAX;
                 p_conn_params.conn_sup_timeout  = (uint16_t) timeout;
+                m_conn_sup_timeout = (uint16_t) timeout;
 
                 (void) sd_ble_gap_conn_param_update(m_conn_handle, &p_conn_params);
 
@@ -889,6 +930,7 @@ static void on_ble_evt(ble_evt_t * p_ble_evt)
             break;
 
         case BLE_GAP_EVT_CONN_PARAM_UPDATE:
+            m_conn_sup_timeout = p_ble_evt->evt.gap_evt.params.conn_param_update.conn_params.conn_sup_timeout;
             break;
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
