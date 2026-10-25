@@ -21,6 +21,7 @@
 #ifndef DFU_TRANSPORT_H__
 #define DFU_TRANSPORT_H__
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /**@brief Function for starting the update of Device Firmware.
@@ -38,6 +39,9 @@ uint32_t dfu_transport_serial_close(void);
 
 uint32_t dfu_transport_ble_update_start(void);
 uint32_t dfu_transport_ble_close();
+
+/**@brief Whether a central is connected to the BLE DFU transport. */
+bool dfu_transport_ble_is_connected(void);
 
 #endif // DFU_TRANSPORT_H__
 

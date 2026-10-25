@@ -67,6 +67,38 @@ static void bootloader_timeout_startup_dfu(void)
     }
 }
 
+/* BLE update mode idle timeout, counted in short ticks (an app_timer interval
+ * must stay well under the 24-bit RTC's 512 s): an update started keeps the
+ * device in DFU mode, a connected central (a phone app being slow) restarts
+ * the count.
+ */
+#define OTA_IDLE_TICK_MS 10000
+
+static uint32_t m_ota_idle_timeout_ms;
+static uint32_t m_ota_idle_ms;
+
+static void dfu_ota_idle_timer_handler(void * p_context)
+{
+  (void) p_context;
+
+  if (m_startup_dfu_has_activity)
+  {
+    return;
+  }
+  if (dfu_transport_ble_is_connected())
+  {
+    m_ota_idle_ms = 0;
+    return;
+  }
+
+  m_ota_idle_ms += OTA_IDLE_TICK_MS;
+  if (m_ota_idle_ms >= m_ota_idle_timeout_ms)
+  {
+    app_timer_stop(_dfu_startup_timer);
+    bootloader_timeout_startup_dfu();
+  }
+}
+
 void bootloader_dfu_activity_mark(void)
 {
     m_startup_dfu_has_activity = true;
@@ -407,6 +439,14 @@ uint32_t bootloader_dfu_start(bool ota, uint32_t timeout_ms, bool cancel_timeout
 
   if ( ota )
   {
+    if ( timeout_ms )
+    {
+      m_ota_idle_timeout_ms = timeout_ms;
+      m_ota_idle_ms = 0;
+      app_timer_create(&_dfu_startup_timer, APP_TIMER_MODE_REPEATED, dfu_ota_idle_timer_handler);
+      app_timer_start(_dfu_startup_timer, APP_TIMER_TICKS(OTA_IDLE_TICK_MS), NULL);
+    }
+
     err_code = dfu_transport_ble_update_start();
   }else
   {

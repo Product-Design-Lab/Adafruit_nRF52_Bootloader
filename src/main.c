@@ -117,6 +117,12 @@ extern void tusb_hal_nrf_power_event(uint32_t event);
 #define BOOTLOADER_VERSION_REGISTER     NRF_TIMER2->CC[0]
 #define DFU_SERIAL_STARTUP_INTERVAL     1000
 
+// BLE update mode with a valid application: back to the application when no
+// update has started and no central is connected for this long.
+#ifndef OTA_DFU_IDLE_TIMEOUT_MS
+#define OTA_DFU_IDLE_TIMEOUT_MS         (5*60*1000)
+#endif
+
 // Allow for using reset button essentially to swap between application and bootloader.
 // This is controlled by a flag in the app and is the behavior of CPX and all Arcade boards when using MakeCode.
 // DFU_DBL_RESET magic is used to determined which mode is entered
@@ -334,7 +340,13 @@ static void check_dfu_mode(void) {
     }
 
     // Initiate an update of the firmware.
-    if (APP_ASKS_FOR_SINGLE_TAP_RESET() || uf2_dfu || serial_only_dfu) {
+    if (_ota_dfu) {
+      // BLE update mode never ended by itself: entered from the application and
+      // left alone (the PC went away), the device stayed in it until power
+      // cycled. With a valid application, go back to it when idle; without
+      // one, wait as long as it takes.
+      bootloader_dfu_start(true, valid_app ? OTA_DFU_IDLE_TIMEOUT_MS : 0, false);
+    } else if (APP_ASKS_FOR_SINGLE_TAP_RESET() || uf2_dfu || serial_only_dfu) {
       // If USB is not enumerated in 3s (eg. because we're running on battery), we restart into app.
       bootloader_dfu_start(_ota_dfu, 3000, true);
     } else {

@@ -610,6 +610,7 @@ static void on_dfu_evt(ble_dfu_t * p_dfu, ble_dfu_evt_t * p_evt)
 
         case BLE_DFU_START:
             m_update_started = true;
+            bootloader_dfu_activity_mark(); // no idle timeout from here on
             m_pkt_type    = PKT_TYPE_START;
             m_update_mode = (uint8_t)p_evt->evt.ble_dfu_pkt_write.p_data[0];
             break;
@@ -1110,6 +1111,12 @@ static void sec_params_init(void)
     m_sec_params.oob          = SEC_PARAM_OOB;
     m_sec_params.min_key_size = SEC_PARAM_MIN_KEY_SIZE;
     m_sec_params.max_key_size = SEC_PARAM_MAX_KEY_SIZE;
+}
+
+
+bool dfu_transport_ble_is_connected(void)
+{
+    return IS_CONNECTED();
 }
 
 
